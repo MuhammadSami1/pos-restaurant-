@@ -1,0 +1,16 @@
+.venv/
+.bootstrap/
+.uv-cache/
+__pycache__/
+*.pyc
+build/
+dist/
+*.db
+*.db-shm
+*.db-wal
+config.json
+images/*
+!images/.gitkeep
+.test-data/
+*.log
+AGENTS.md

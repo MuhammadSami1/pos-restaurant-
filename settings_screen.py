@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import copy
 import math
+from decimal import Decimal
 from tkinter import filedialog
 
 import customtkinter as ctk
 from PIL import Image, ImageOps
 
 from app_config import image_path, import_image, save_config
-from models import money
+from models import amount, money, portion_quantities
 from ui_common import ACCENT, SELECTION, SELECTION_HOVER, BG, DANGER, MUTED, PANEL, TEXT, confirm, error, thumbnail
 
 
@@ -86,6 +87,14 @@ class DishEditor(ctk.CTkToplevel):
         body.grid_columnconfigure((0, 1), weight=1)
         self.name = ctk.StringVar(value=self.dish.get("name", ""))
         self.price = ctk.StringVar(value=str(self.dish.get("price", "")))
+        saved_prices = self.dish.get("portion_prices") or {}
+        self.portion_price_vars = {
+            key: ctk.StringVar(value=str(saved_prices.get(key, "")))
+            for key in ("0.25", "0.5", "0.75")
+        }
+        self.portion_price_vars["1"] = self.price
+        self._custom_portion_keys = set(saved_prices) - {"1"}
+        self._updating_portions = False
         self.category = ctk.StringVar(value=self.dish.get("category", "General"))
         self.sell_type = ctk.StringVar(value="Weight (kg)" if self.dish.get("sell_type") == "kg" else "Count")
         self.active = ctk.BooleanVar(value=bool(self.dish.get("active", 1)))
@@ -96,16 +105,29 @@ class DishEditor(ctk.CTkToplevel):
         sell_box.grid(row=1, column=0, sticky="ew", padx=10, pady=7)
         ctk.CTkLabel(sell_box, text="Sold by", text_color=MUTED, anchor="w").pack(fill="x")
         ctk.CTkOptionMenu(sell_box, variable=self.sell_type, values=["Count", "Weight (kg)"],
-                          height=38, command=self._selling_changed).pack(fill="x", pady=(3, 0))
-        price_box = ctk.CTkFrame(body, fg_color="transparent")
-        price_box.grid(row=1, column=1, sticky="ew", padx=10, pady=7)
-        self.price_label = ctk.CTkLabel(price_box, text="Price (Rs.)", text_color=MUTED, anchor="w")
-        self.price_label.pack(fill="x")
-        ctk.CTkEntry(price_box, textvariable=self.price, height=38).pack(fill="x", pady=(3, 0))
+                          height=38).pack(fill="x", pady=(3, 0))
+        prices = ctk.CTkFrame(body, fg_color="transparent")
+        prices.grid(row=2, column=0, columnspan=2, sticky="ew")
+        prices.grid_columnconfigure((0, 1), weight=1)
+        self.portion_price_fields = {}
+        self.portion_price_labels = {}
+        for key, variable in self.portion_price_vars.items():
+            box = ctk.CTkFrame(prices, fg_color="transparent")
+            label = ctk.CTkLabel(box, text="", text_color=MUTED, anchor="w")
+            label.pack(fill="x")
+            ctk.CTkEntry(box, textvariable=variable, height=38).pack(fill="x", pady=(3, 0))
+            self.portion_price_fields[key] = box
+            self.portion_price_labels[key] = label
+            if key != "1":
+                variable.trace_add("write", lambda *_args, k=key: self._portion_edited(k))
+        self.price_label = self.portion_price_labels["1"]
+        self.price.trace_add("write", self._fill_portion_defaults)
+        self.sell_type.trace_add("write", self._selling_changed)
+        self._fill_portion_defaults()
         self._selling_changed()
 
         photo_box = ctk.CTkFrame(body, fg_color=PANEL, corner_radius=12)
-        photo_box.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=16)
+        photo_box.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=16)
         self.photo_preview = ctk.CTkLabel(photo_box, text="No photo", width=150, height=150,
                                          text_color=MUTED)
         self.photo_preview.pack(side="left", padx=16, pady=16)
@@ -120,11 +142,11 @@ class DishEditor(ctk.CTkToplevel):
         ctk.CTkButton(controls, text="Remove photo", height=34, fg_color="transparent",
                       text_color=MUTED, command=self.remove_photo).pack(fill="x", pady=(6, 0))
         ctk.CTkSwitch(body, text="Show on the billing screen", variable=self.active,
-                      progress_color=ACCENT).grid(row=3, column=0, columnspan=2,
+                      progress_color=ACCENT).grid(row=4, column=0, columnspan=2,
                                                  sticky="w", padx=12, pady=(0, 12))
-        ctk.CTkLabel(body, text="Tap a dish to add 1. Weight dishes also accept decimal kilograms.",
+        ctk.CTkLabel(body, text="Set each portion's selling price. Larger quantities use the full price plus the remaining portion.",
                      text_color=MUTED, wraplength=490, justify="left").grid(
-                         row=4, column=0, columnspan=2, sticky="w", padx=12, pady=4)
+                         row=5, column=0, columnspan=2, sticky="w", padx=12, pady=4)
         self._update_photo()
         self.after(100, self._focus)
         self.bind("<Escape>", lambda _event: self.destroy())
@@ -135,7 +157,34 @@ class DishEditor(ctk.CTkToplevel):
             self.name_entry.focus_set()
 
     def _selling_changed(self, *_):
-        self.price_label.configure(text="Price per kg (Rs.)" if self.sell_type.get() == "Weight (kg)" else "Price (Rs.)")
+        unit = "kg" if self.sell_type.get() == "Weight (kg)" else "count"
+        for box in self.portion_price_fields.values():
+            box.grid_remove()
+        for index, quantity in enumerate(portion_quantities(unit)):
+            key = f"{quantity:g}"
+            suffix = " kg" if unit == "kg" else ""
+            self.portion_price_labels[key].configure(text=f"Price for {key}{suffix} (Rs.)")
+            self.portion_price_fields[key].grid(row=index // 2, column=index % 2,
+                                               sticky="ew", padx=10, pady=7)
+
+    def _portion_edited(self, key):
+        if not self._updating_portions:
+            self._custom_portion_keys.add(key)
+
+    def _fill_portion_defaults(self, *_):
+        """Suggest proportional prices until the owner enters a custom amount."""
+        try:
+            price = amount(self.price.get().strip(), "Price for 1")
+        except ValueError:
+            return
+        self._updating_portions = True
+        try:
+            for key, variable in self.portion_price_vars.items():
+                if key != "1" and key not in self._custom_portion_keys:
+                    default = amount(Decimal(str(price)) * Decimal(key))
+                    variable.set(f"{default:.2f}".removesuffix(".00"))
+        finally:
+            self._updating_portions = False
 
     def _update_photo(self):
         image = None
@@ -177,16 +226,17 @@ class DishEditor(ctk.CTkToplevel):
             name = self.name.get().strip()
             if not name:
                 raise ValueError("Enter a dish name.")
-            try:
-                price = float(self.price.get().strip())
-            except ValueError:
-                raise ValueError("Enter a numeric price, for example 250 or 950.50.") from None
-            if not math.isfinite(price) or price < 0 or price > 999_999_999.99:
-                raise ValueError("Price must be between Rs. 0 and Rs. 999,999,999.99.")
+            unit = "kg" if self.sell_type.get() == "Weight (kg)" else "count"
+            portions = {}
+            for quantity in portion_quantities(unit):
+                key = f"{quantity:g}"
+                suffix = " kg" if unit == "kg" else ""
+                portions[key] = amount(self.portion_price_vars[key].get().strip(),
+                                       f"Price for {key}{suffix}")
             path = import_image(self.selected_photo) if self.selected_photo else self.photo_path
             values = dict(self.dish)
-            values.update(name=name, price=round(price, 2),
-                          sell_type="kg" if self.sell_type.get() == "Weight (kg)" else "count",
+            values.update(name=name, price=portions["1"], portion_prices=portions,
+                          sell_type=unit,
                           category=self.category.get().strip() or "General",
                           image_path=path, active=int(self.active.get()))
             self.app.db.save_dish(values)

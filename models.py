@@ -58,9 +58,53 @@ def validate_quantity(value: Any, unit: str) -> float:
         raise ValueError("Quantity must be greater than zero.")
     if qty > MAX_QUANTITY:
         raise ValueError("Quantity must not exceed 1,000,000.")
-    if unit == "count" and not qty.is_integer():
-        raise ValueError("Count dishes need a whole-number quantity.")
+    if unit == "count" and Decimal(str(qty)) % Decimal("0.5"):
+        raise ValueError("Count dishes need a quantity in steps of 0.5.")
     return qty
+
+
+def portion_quantities(unit: str) -> tuple[float, ...]:
+    if unit == "kg":
+        return (0.25, 0.5, 0.75, 1)
+    if unit == "count":
+        return (0.5, 1)
+    raise ValueError("Selling type must be Count or Weight (kg).")
+
+
+def normalize_portion_prices(prices: Any, unit: str, price: Any) -> dict[str, float]:
+    """Validate custom prices; an empty map keeps existing linear pricing."""
+    keys = tuple(format(qty, "g") for qty in portion_quantities(unit))
+    full_price = amount(price, "Price")
+    if prices is None or prices == {}:
+        return {}
+    if not isinstance(prices, dict) or set(prices) != set(keys):
+        labels = ", ".join(f"{key} kg" if unit == "kg" else key for key in keys)
+        raise ValueError(f"Enter a price for every portion: {labels}.")
+    result = {key: amount(prices[key], f"Price for {key}{' kg' if unit == 'kg' else ''}")
+              for key in keys}
+    # Keep the established price field authoritative for callers editing a dish.
+    result["1"] = full_price
+    return result
+
+
+def item_amount(item: dict, qty: Any = None) -> float:
+    """Price complete portions plus a remainder using this item's saved rates."""
+    unit = item.get("unit", item.get("sell_type", "count"))
+    quantity = validate_quantity(item.get("qty") if qty is None else qty, unit)
+    price = amount(item.get("price"), "Price")
+    prices = normalize_portion_prices(item.get("portion_prices"), unit, price)
+    exact_quantity = Decimal(str(quantity))
+    if not prices:
+        return amount(exact_quantity * Decimal(str(price)), "Line amount")
+    step = Decimal("0.25") if unit == "kg" else Decimal("0.5")
+    if exact_quantity % step:
+        raise ValueError("Dishes with portion prices need a quantity in steps of 0.25 kg.")
+    whole = int(exact_quantity)
+    remainder = exact_quantity - whole
+    total = Decimal(whole) * Decimal(str(prices["1"]))
+    if remainder:
+        total += Decimal(str(prices[format(remainder.normalize(), "f")]))
+    return amount(total, "Line amount")
 
 
 def quantity_text(qty: Any, unit: str) -> str:
@@ -70,7 +114,7 @@ def quantity_text(qty: Any, unit: str) -> str:
 
 
 def normalize_items(items: Iterable[dict]) -> list[dict]:
-    """Freeze dish details and calculate every line from its rate and quantity."""
+    """Freeze dish details and calculate every line from its saved portion rates."""
     result = []
     for item in items:
         if not isinstance(item, dict):
@@ -81,9 +125,12 @@ def normalize_items(items: Iterable[dict]) -> list[dict]:
         unit = item.get("unit", item.get("sell_type", "count"))
         qty = validate_quantity(item.get("qty"), unit)
         price = amount(item.get("price"), "Price")
-        line_amount = amount(Decimal(str(qty)) * Decimal(str(price)), "Line amount")
+        prices = normalize_portion_prices(item.get("portion_prices"), unit, price)
+        line_amount = item_amount(item, qty)
         line = {"name": name, "qty": qty, "unit": unit,
                 "price": price, "amount": line_amount}
+        if prices:
+            line["portion_prices"] = prices
         if item.get("dish_id") is not None:
             line["dish_id"] = int(item["dish_id"])
         result.append(line)

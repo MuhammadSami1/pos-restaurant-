@@ -13,7 +13,8 @@ import customtkinter as ctk
 
 from app_config import load_config, save_config
 from db import Database
-from models import amount, calculate_totals, money, quantity_text, validate_quantity
+from models import (amount, calculate_totals, item_amount, money, normalize_items,
+                    quantity_text, validate_quantity)
 from ui_common import (ACCENT, ACCENT_TEXT, SELECTION, SELECTION_HOVER, DANGER_HOVER,
                        BG, PANEL, MUTED, TEXT, DANGER, GREEN, confirm, error, thumbnail,
                        logo_thumbnail, modal, configure_theme, bring_to_front)
@@ -23,9 +24,10 @@ class QuantityDialog(ctk.CTkToplevel):
     def __init__(self, app, item, callback, initial=1, editing=False):
         super().__init__(app)
         self.title("Change quantity" if editing else "Add quantity")
-        modal(self, app, 460, 335)
+        modal(self, app, 460, 485)
         self.resizable(False, False)
         self.unit = item.get("unit", item.get("sell_type", "count"))
+        self.item = copy.deepcopy(item)
         self.value = tk.StringVar(value=str(initial))
         self.callback = callback
         ctk.CTkLabel(self, text=item["name"], font=("Segoe UI", 22, "bold"), wraplength=420).pack(padx=20, pady=(22, 4))
@@ -38,23 +40,39 @@ class QuantityDialog(ctk.CTkToplevel):
         ctk.CTkButton(row, text="+", width=65, height=48, command=lambda: self.step(1)).pack(side="left")
         presets = ctk.CTkFrame(self, fg_color="transparent")
         presets.pack()
-        for val in ([0.5, 1, 1.5, 2, 2.5] if self.unit == "kg" else [1, 2, 3, 4, 5]):
-            ctk.CTkButton(presets, text=str(val), width=68, height=38, fg_color=PANEL, text_color=TEXT,
-                          command=lambda n=val: self.value.set(str(n))).pack(side="left", padx=4)
+        values = [0.25, 0.5, 0.75, 1, 1.5, 2, 2.5] if self.unit == "kg" else [0.5, 1, 2, 3, 4, 5]
+        for index, val in enumerate(values):
+            ctk.CTkButton(presets, text=str(val), width=90, height=38, fg_color=PANEL, text_color=TEXT,
+                          command=lambda n=val: self.value.set(str(n))).grid(row=index // 4, column=index % 4, padx=4, pady=4)
+        prices = item.get("portion_prices") or {}
+        price_text = "  ·  ".join(f"{qty}{' kg' if self.unit == 'kg' else ''}: {money(price)}"
+                                  for qty, price in prices.items())
+        ctk.CTkLabel(self, text=price_text, text_color=MUTED, wraplength=400).pack(padx=24, pady=(6, 0))
+        self.line_total = ctk.CTkLabel(self, text="", font=("Segoe UI", 18, "bold"))
+        self.line_total.pack(pady=(4, 0))
         self.problem = ctk.CTkLabel(self, text="", text_color=DANGER)
         self.problem.pack()
         ctk.CTkButton(self, text="Update quantity" if editing else "Add to bill", height=44, width=392,
                       fg_color=ACCENT, text_color="#20180E", command=self.submit).pack(padx=24)
         self.bind("<Return>", lambda e: self.submit())
         self.bind("<Escape>", lambda e: self.destroy())
+        self.value.trace_add("write", lambda *_: self.update_amount())
+        self.update_amount()
         self.after(150, self.entry.focus_set)
+
+    def update_amount(self):
+        try:
+            self.line_total.configure(text=f"Amount: {money(item_amount(self.item, self.value.get()))}")
+            self.problem.configure(text="")
+        except ValueError:
+            self.line_total.configure(text="Amount: —")
 
     def step(self, direction):
         try:
             current = validate_quantity(self.value.get(), self.unit)
-            step = 0.5 if self.unit == "kg" else 1
+            step = 0.25 if self.unit == "kg" else 0.5
             updated = max(Decimal(str(step)), Decimal(str(current)) + Decimal(str(direction * step)))
-            validate_quantity(updated, self.unit)
+            item_amount(self.item, updated)
             self.value.set(format(updated.normalize(), "f"))
         except ValueError as exc:
             self.problem.configure(text=str(exc))
@@ -62,6 +80,7 @@ class QuantityDialog(ctk.CTkToplevel):
     def submit(self):
         try:
             qty = validate_quantity(self.value.get(), self.unit)
+            item_amount(self.item, qty)
             self.callback(qty)
         except ValueError as exc:
             self.problem.configure(text=str(exc))
@@ -425,15 +444,16 @@ class BillingApp(ctk.CTk):
             error(self, "Cannot add quantity", exc)
 
     def add_item(self, dish, qty=1):
-        qty = validate_quantity(qty, dish["sell_type"])
+        line = normalize_items([{**dish, "dish_id": dish["id"], "qty": qty}])[0]
         # Price/type edits do not retroactively change an order already on screen.
-        existing = next((i for i in self.cart if i["dish_id"] == dish["id"] and i["price"] == dish["price"] and i["unit"] == dish["sell_type"] and i["name"] == dish["name"]), None)
+        existing = next((i for i in self.cart if all(i.get(key) == line.get(key)
+                         for key in ("dish_id", "price", "unit", "name", "portion_prices"))), None)
         if existing:
-            new_qty = validate_quantity(Decimal(str(existing["qty"])) + Decimal(str(qty)), existing["unit"])
-            new_amount = amount(Decimal(str(new_qty)) * Decimal(str(existing["price"])), "Line amount")
+            new_qty = validate_quantity(Decimal(str(existing["qty"])) + Decimal(str(line["qty"])), existing["unit"])
+            new_amount = item_amount(existing, new_qty)
             existing.update(qty=new_qty, amount=new_amount)
         else:
-            self.cart.append({"dish_id": dish["id"], "name": dish["name"], "qty": qty, "unit": dish["sell_type"], "price": dish["price"], "amount": amount(Decimal(str(qty)) * Decimal(str(dish["price"])), "Line amount")})
+            self.cart.append(line)
         self.render_cart()
 
     def render_cart(self):
@@ -472,7 +492,8 @@ class BillingApp(ctk.CTk):
             row.grid(row=idx, column=0, sticky="ew", pady=4)
             row.grid_columnconfigure(0, weight=1)
             ctk.CTkLabel(row, text=item["name"], height=22, font=("Segoe UI", 14, "bold"), anchor="w", wraplength=245).grid(row=0, column=0, sticky="w", padx=10, pady=(5, 0))
-            ctk.CTkLabel(row, text=money(item["price"]), height=22, width=88, anchor="e", text_color=MUTED, font=("Segoe UI", 12)).grid(row=0, column=1, padx=4)
+            rate = "By portion" if item.get("portion_prices") else money(item["price"])
+            ctk.CTkLabel(row, text=rate, height=22, width=88, anchor="e", text_color=MUTED, font=("Segoe UI", 12)).grid(row=0, column=1, padx=4)
             amount_label = ctk.CTkLabel(row, text=money(item["amount"]), height=22, width=102, anchor="e", font=("Segoe UI", 14, "bold"))
             amount_label.grid(row=0, column=2, padx=(4, 10))
             controls = ctk.CTkFrame(row, fg_color="transparent")
@@ -485,7 +506,7 @@ class BillingApp(ctk.CTk):
         self.update_totals()
 
     def change_qty(self, item, delta):
-        step = 0.5 if item["unit"] == "kg" else 1
+        step = 0.25 if item["unit"] == "kg" else 0.5
         qty = float(Decimal(str(item["qty"])) + Decimal(str(delta * step)))
         if qty <= 0:
             self.remove_item(item)
@@ -497,7 +518,7 @@ class BillingApp(ctk.CTk):
 
     def set_qty(self, item, qty):
         new_qty = validate_quantity(qty, item["unit"])
-        new_amount = amount(Decimal(str(new_qty)) * Decimal(str(item["price"])), "Line amount")
+        new_amount = item_amount(item, new_qty)
         item.update(qty=new_qty, amount=new_amount)
         self.render_cart()
 
@@ -687,7 +708,29 @@ class BillingApp(ctk.CTk):
         except Exception as exc:
             error(self, "Theme could not be saved", exc)
             return
+        # Changing the Windows titlebar briefly withdraws the root, which can
+        # leave transient dialogs hidden when their own theme update runs.
+        visible_dialogs = []
+
+        def collect_dialogs(parent):
+            for child in parent.winfo_children():
+                if isinstance(child, tk.Toplevel) and child.winfo_viewable():
+                    visible_dialogs.append(child)
+                collect_dialogs(child)
+
+        collect_dialogs(self)
+        focused = self.focus_get()
         ctk.set_appearance_mode(self.config["theme"])
+
+        def restore_dialogs():
+            for dialog in visible_dialogs:
+                if dialog.winfo_exists():
+                    dialog.deiconify()
+            if focused is not None and focused.winfo_exists() and focused.winfo_viewable():
+                focused.focus_set()
+
+        restore_dialogs()
+        self.after(120, restore_dialogs)
         self.theme_btn.configure(text="☀  Light" if self.config["theme"] == "dark" else "☾  Dark")
 
     def notify(self, text):

@@ -297,7 +297,7 @@ class BillDetail(ctk.CTkToplevel):
             items = json.loads(items)
         for row, item in enumerate(items, 1):
             values = (item["name"], quantity_text(item["qty"], item.get("unit", "count")),
-                      money(item["price"]), money(item["amount"]))
+                      "By portion" if item.get("portion_prices") else money(item["price"]), money(item["amount"]))
             for column, value in enumerate(values):
                 ctk.CTkLabel(body, text=value, anchor="w" if column == 0 else "e",
                              wraplength=215 if column == 0 else 120, justify="left").grid(

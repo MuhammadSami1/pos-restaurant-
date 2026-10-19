@@ -10,7 +10,7 @@ import sqlite3
 import time
 
 from app_config import DATA_DIR, image_path
-from models import amount, cents, normalize_items
+from models import amount, cents, normalize_items, normalize_portion_prices
 
 
 SEED_DISHES = [
@@ -58,7 +58,8 @@ class Database:
                 id INTEGER PRIMARY KEY, name TEXT NOT NULL, price REAL NOT NULL,
                 sell_type TEXT DEFAULT 'count', image_path TEXT DEFAULT '',
                 category TEXT DEFAULT 'General', active INTEGER DEFAULT 1,
-                sort_order INTEGER DEFAULT 0, deleted INTEGER DEFAULT 0)""")
+                sort_order INTEGER DEFAULT 0, deleted INTEGER DEFAULT 0,
+                portion_prices TEXT NOT NULL DEFAULT '{}')""")
             self.connection.execute("""CREATE TABLE IF NOT EXISTS bills (
                 id INTEGER PRIMARY KEY, bill_no INTEGER NOT NULL, date TEXT NOT NULL,
                 items TEXT NOT NULL, subtotal REAL NOT NULL, discount REAL NOT NULL,
@@ -69,6 +70,8 @@ class Database:
             dish_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(dishes)")}
             if "deleted" not in dish_columns:
                 self.connection.execute("ALTER TABLE dishes ADD COLUMN deleted INTEGER DEFAULT 0")
+            if "portion_prices" not in dish_columns:
+                self.connection.execute("ALTER TABLE dishes ADD COLUMN portion_prices TEXT NOT NULL DEFAULT '{}'")
             bill_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(bills)")}
             if "order_info" not in bill_columns:
                 self.connection.execute("ALTER TABLE bills ADD COLUMN order_info TEXT DEFAULT '{}'")
@@ -88,7 +91,12 @@ class Database:
         sql = "SELECT * FROM dishes WHERE deleted=0"
         if not include_inactive:
             sql += " AND active=1"
-        return [dict(row) for row in self.connection.execute(sql + " ORDER BY sort_order,id")]
+        dishes = []
+        for row in self.connection.execute(sql + " ORDER BY sort_order,id"):
+            dish = dict(row)
+            dish["portion_prices"] = json.loads(dish["portion_prices"] or "{}")
+            dishes.append(dish)
+        return dishes
 
     def save_dish(self, dish: dict) -> int:
         name = str(dish.get("name", "")).strip()
@@ -98,6 +106,8 @@ class Database:
         sell_type = dish.get("sell_type", "count")
         if sell_type not in ("count", "kg"):
             raise ValueError("Choose Count or Weight (kg).")
+        prices = normalize_portion_prices(dish.get("portion_prices"), sell_type, price)
+        encoded_prices = json.dumps(prices, allow_nan=False)
         photo = str(dish.get("image_path", ""))
         if photo:
             image_path(photo)
@@ -112,13 +122,13 @@ class Database:
                     raise ValueError("This dish no longer exists.")
                 sort_order = int(dish.get("sort_order", existing["sort_order"]))
                 self.connection.execute("""UPDATE dishes SET name=?,price=?,sell_type=?,image_path=?,
-                    category=?,active=?,sort_order=? WHERE id=?""",
-                    (name, price, sell_type, photo, category, active, sort_order, dish_id))
+                    category=?,active=?,sort_order=?,portion_prices=? WHERE id=?""",
+                    (name, price, sell_type, photo, category, active, sort_order, encoded_prices, dish_id))
                 return int(dish_id)
             default_order = self.connection.execute("SELECT COALESCE(MAX(sort_order),-1)+1 FROM dishes").fetchone()[0]
             cursor = self.connection.execute("""INSERT INTO dishes
-                (name,price,sell_type,image_path,category,active,sort_order) VALUES (?,?,?,?,?,?,?)""",
-                (name, price, sell_type, photo, category, active, int(dish.get("sort_order", default_order))))
+                (name,price,sell_type,image_path,category,active,sort_order,portion_prices) VALUES (?,?,?,?,?,?,?,?)""",
+                (name, price, sell_type, photo, category, active, int(dish.get("sort_order", default_order)), encoded_prices))
             return cursor.lastrowid
 
     def delete_dish(self, dish_id: int):

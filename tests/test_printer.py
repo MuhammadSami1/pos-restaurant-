@@ -32,6 +32,34 @@ class ReceiptTests(unittest.TestCase):
         self.assertIn("13-Oct-2026  09:41 PM", text)
         self.assertNotIn("9,999", text)
 
+    def test_fractional_portions_print_saved_amounts_on_both_paper_widths(self):
+        self.bill["items"] = [
+            {"name": "Chicken", "qty": 0.25, "unit": "kg", "price": 1000,
+             "portion_prices": {"0.25": 300, "0.5": 550, "0.75": 800, "1": 1000}, "amount": 300},
+            {"name": "Mutton", "qty": 0.75, "unit": "kg", "price": 1800,
+             "portion_prices": {"0.25": 500, "0.5": 950, "0.75": 1400, "1": 1800}, "amount": 1400},
+            {"name": "Biryani", "qty": 0.5, "unit": "count", "price": 250,
+             "portion_prices": {"0.5": 150, "1": 250}, "amount": 150},
+        ]
+        self.bill.update(subtotal=1850, discount=0, tax=0, total=1850)
+        # A reprint must use its stored amounts, even if pricing metadata differs.
+        self.bill["items"][0]["portion_prices"]["0.25"] = 9999
+        original = copy.deepcopy(self.bill)
+        for width, columns in ((58, 32), (80, 48)):
+            with self.subTest(paper_width=width):
+                self.config["paper_width"] = width
+                receipt = printer._receipt(self.bill, self.config)
+                for prefix, amount in (("0.25 kg Chicken", "300"), ("0.75 kg Mutton", "1,400"),
+                                       ("0.5x Biryani", "150")):
+                    line = next(line for line in receipt.lines if line.left == prefix)
+                    self.assertEqual(line.right, amount)
+                text = printer.receipt_text(self.bill, self.config)
+                self.assertIn("Rs. 1,850", text)
+                self.assertNotIn("9,999", text)
+                self.assertTrue(all(len(line.text(columns)) * line.width <= columns
+                                    for line in receipt.lines))
+        self.assertEqual(self.bill, original)
+
     def test_each_line_fits_both_paper_widths_including_large_numbers(self):
         self.bill["items"][0]["name"] = "Very long Chicken Karahi special family takeaway with extra spices " * 3
         self.bill["total"] = 123456789.75

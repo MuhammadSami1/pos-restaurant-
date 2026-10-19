@@ -30,8 +30,13 @@ This workspace also includes a local uv installation:
 ## Daily use
 
 - Tap a dish to add one. Hold it for quantity presets or a typed quantity.
-- Count dishes use whole quantities; weight dishes use kilograms. Edit a bill
-  line with **+ / − / ✎ / ✕** before printing.
+- Set separate prices in the dish editor: **0.25 / 0.5 / 0.75 / 1 kg** for weight
+  dishes, or **0.5 / 1** for count dishes. For quantities above 1, the price is
+  full portions plus the remaining portion (1.75 kg = 1 kg price + 0.75 kg price).
+  Existing dishes keep their original pricing until you save portion prices.
+- Edit a bill line with **+ / − / ✎ / ✕** before printing. **+ / −** changes weight
+  by **0.25 kg**, or count by **0.5**. Quantity presets include quarter and
+  three-quarter kg and half count portions. The quantity popup shows the amount.
 - A dish's corner **✎** edits its menu details; **✕** deletes it from the menu.
   Existing bill lines retain their original names, prices, and selling types.
 - Choose Dine-in, Takeaway, or Delivery. Table/waiter and customer details are

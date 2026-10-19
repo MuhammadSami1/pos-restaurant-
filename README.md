@@ -7,7 +7,7 @@ to billing, with no account, login, or splash screen.
 
 Double-click **`dist\RestaurantBilling.exe`**, or double-click **`launch.cmd`**.
 The executable includes Python and all libraries; the restaurant PC does not
-need Python, uv, or an internet connection.
+need Python, uv, or an internet connection
 
 The nine starter dishes and prices come from AGENTS.md. Open **Settings → Dishes**
 to change them. Dish changes appear immediately on the billing screen.

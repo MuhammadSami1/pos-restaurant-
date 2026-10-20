@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sqlite3
 import time
+import unicodedata
 
 from app_config import DATA_DIR, image_path
 from models import amount, cents, normalize_items, normalize_portion_prices
@@ -24,6 +25,18 @@ SEED_DISHES = [
     ("Cold Drink", 100, "count", "Drinks"),
     ("Chai", 80, "count", "Drinks"),
 ]
+
+
+def customer_name_key(name: str) -> str:
+    """Match names consistently, including the requested Ahmad/Ahmed spelling."""
+    text = " ".join(unicodedata.normalize("NFKC", name).casefold().split())
+    return " ".join("ahmed" if word == "ahmad" else word for word in text.split())
+
+
+class DuplicateCustomerError(ValueError):
+    def __init__(self, customer: dict):
+        super().__init__("This name already exists")
+        self.customer = customer
 
 
 class Database:
@@ -54,6 +67,17 @@ class Database:
     def _initialize(self):
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute("""CREATE TABLE IF NOT EXISTS customers (
+                id INTEGER PRIMARY KEY, name TEXT NOT NULL,
+                phone TEXT DEFAULT '', created_at TEXT,
+                name_key TEXT NOT NULL)""")
+            customer_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(customers)")}
+            if "name_key" not in customer_columns:
+                self.connection.execute("ALTER TABLE customers ADD COLUMN name_key TEXT")
+                for row in self.connection.execute("SELECT id,name FROM customers").fetchall():
+                    self.connection.execute("UPDATE customers SET name_key=? WHERE id=?",
+                                            (customer_name_key(row["name"]), row["id"]))
+            self.connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS customers_name_key ON customers(name_key)")
             self.connection.execute("""CREATE TABLE IF NOT EXISTS dishes (
                 id INTEGER PRIMARY KEY, name TEXT NOT NULL, price REAL NOT NULL,
                 sell_type TEXT DEFAULT 'count', image_path TEXT DEFAULT '',
@@ -65,7 +89,8 @@ class Database:
                 items TEXT NOT NULL, subtotal REAL NOT NULL, discount REAL NOT NULL,
                 tax REAL NOT NULL, total REAL NOT NULL, created_at TEXT NOT NULL,
                 status TEXT DEFAULT 'active', order_info TEXT DEFAULT '{}',
-                delivery_fee REAL NOT NULL DEFAULT 0)""")
+                delivery_fee REAL NOT NULL DEFAULT 0,
+                customer_id INTEGER DEFAULT NULL REFERENCES customers(id))""")
             self.connection.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
             dish_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(dishes)")}
             if "deleted" not in dish_columns:
@@ -79,8 +104,11 @@ class Database:
                 self.connection.execute("ALTER TABLE bills ADD COLUMN status TEXT DEFAULT 'active'")
             if "delivery_fee" not in bill_columns:
                 self.connection.execute("ALTER TABLE bills ADD COLUMN delivery_fee REAL NOT NULL DEFAULT 0")
+            if "customer_id" not in bill_columns:
+                self.connection.execute("ALTER TABLE bills ADD COLUMN customer_id INTEGER DEFAULT NULL REFERENCES customers(id)")
             self.connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS bills_daily_number ON bills(date, bill_no)")
             self.connection.execute("CREATE INDEX IF NOT EXISTS bills_sales ON bills(date, status)")
+            self.connection.execute("CREATE INDEX IF NOT EXISTS bills_customer ON bills(customer_id, status, created_at)")
             if self.connection.execute("SELECT COUNT(*) FROM dishes").fetchone()[0] == 0:
                 self.connection.executemany(
                     "INSERT INTO dishes(name,price,sell_type,category,sort_order) VALUES (?,?,?,?,?)",
@@ -164,7 +192,8 @@ class Database:
         return result
 
     def save_bill(self, items, discount=0, tax=0, total=None, subtotal=None,
-                  order_info=None, now=None, delivery_fee=0) -> dict:
+                  order_info=None, now=None, delivery_fee=0,
+                  customer_id=None, new_customer=None) -> dict:
         normalized = normalize_items(items)
         if not normalized:
             raise ValueError("Add at least one dish before printing.")
@@ -184,6 +213,21 @@ class Database:
         for key, value in order.items():
             if not isinstance(key, str) or not isinstance(value, str):
                 raise ValueError("Order information must contain text fields.")
+        if customer_id is not None and new_customer is not None:
+            raise ValueError("Choose an existing customer or enter a new customer, not both.")
+        if customer_id is not None and (isinstance(customer_id, bool)
+                                        or not isinstance(customer_id, int) or customer_id <= 0):
+            raise ValueError("Choose a valid customer.")
+        if new_customer is not None:
+            if not isinstance(new_customer, dict) or not isinstance(new_customer.get("name"), str):
+                raise ValueError("Enter a customer name.")
+            customer_name = " ".join(new_customer["name"].split())
+            if not customer_name:
+                raise ValueError("Enter a customer name.")
+            customer_phone = new_customer.get("phone", "")
+            if not isinstance(customer_phone, str):
+                raise ValueError("Customer phone must contain text.")
+            customer_phone = customer_phone.strip()
         current = now or datetime.now()
         if isinstance(current, str):
             current = datetime.fromisoformat(current)
@@ -191,13 +235,32 @@ class Database:
         created_at = current.isoformat(timespec="seconds")
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
+            customer = None
+            if new_customer is not None:
+                existing = self.find_customer_by_name(customer_name)
+                if existing is not None:
+                    raise DuplicateCustomerError(existing)
+                cursor = self.connection.execute("""INSERT INTO customers(name,phone,created_at,name_key)
+                    VALUES (?,?,?,?)""", (customer_name, customer_phone, created_at, customer_name_key(customer_name)))
+                customer_id = cursor.lastrowid
+                customer = {"name": customer_name, "phone": customer_phone}
+            elif customer_id is not None:
+                customer = self.get_customer(customer_id)
+                if customer is None:
+                    raise ValueError("This customer no longer exists. Choose a customer again.")
+            if customer is not None:
+                order["khata_customer_name"] = customer["name"]
+                order["khata_customer_phone"] = customer["phone"]
+            else:
+                order.pop("khata_customer_name", None)
+                order.pop("khata_customer_phone", None)
             bill_no = self.connection.execute("SELECT COALESCE(MAX(bill_no),0)+1 FROM bills WHERE date=?", (day,)).fetchone()[0]
             cursor = self.connection.execute("""INSERT INTO bills
-                (bill_no,date,items,subtotal,discount,tax,total,created_at,order_info,delivery_fee)
-                VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (bill_no,date,items,subtotal,discount,tax,total,created_at,order_info,delivery_fee,customer_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (bill_no, day, json.dumps(normalized, ensure_ascii=False, allow_nan=False),
                  computed_subtotal, discount, tax, computed_total, created_at,
-                 json.dumps(order, ensure_ascii=False), delivery_fee))
+                 json.dumps(order, ensure_ascii=False), delivery_fee, customer_id))
             bill_id = cursor.lastrowid
         return self.get_bill(bill_id)
 
@@ -224,6 +287,45 @@ class Database:
                 group["qty"] = round(group["qty"] + item["qty"], 6)
                 group["amount"] = round(group["amount"] + item["amount"], 2)
         return sorted(groups.values(), key=lambda item: (-item["amount"], item["name"]))
+
+    def list_customers(self, search: str = "") -> list[dict]:
+        rows = self.connection.execute("""SELECT c.id,c.name,c.phone,c.created_at,
+            COALESCE(SUM(b.total),0) AS balance FROM customers c
+            LEFT JOIN bills b ON b.customer_id=c.id AND b.status='active'
+            GROUP BY c.id ORDER BY c.name_key,c.id""")
+        query = customer_name_key(search)
+        result = []
+        for row in rows:
+            customer = dict(row)
+            customer["balance"] = round(customer["balance"], 2)
+            if not query or query in customer_name_key(customer["name"]) or query in customer["phone"].casefold():
+                result.append(customer)
+        return result
+
+    def get_customer(self, customer_id: int) -> dict | None:
+        row = self.connection.execute("""SELECT c.id,c.name,c.phone,c.created_at,
+            COALESCE(SUM(b.total),0) AS balance FROM customers c
+            LEFT JOIN bills b ON b.customer_id=c.id AND b.status='active'
+            WHERE c.id=? GROUP BY c.id""", (customer_id,)).fetchone()
+        if row is None:
+            return None
+        customer = dict(row)
+        customer["balance"] = round(customer["balance"], 2)
+        return customer
+
+    def find_customer_by_name(self, name: str) -> dict | None:
+        row = self.connection.execute("SELECT id FROM customers WHERE name_key=?",
+                                      (customer_name_key(name),)).fetchone()
+        return self.get_customer(row["id"]) if row is not None else None
+
+    def khata_total(self) -> float:
+        total = self.connection.execute("""SELECT COALESCE(SUM(total),0) FROM bills
+            WHERE customer_id IS NOT NULL AND status='active'""").fetchone()[0]
+        return round(total, 2)
+
+    def customer_bills(self, customer_id: int) -> list[dict]:
+        return [self._bill(row) for row in self.connection.execute("""SELECT * FROM bills
+            WHERE customer_id=? AND status='active' ORDER BY created_at DESC,id DESC""", (customer_id,))]
 
     def void_bill(self, bill_id: int) -> bool:
         with self.connection:

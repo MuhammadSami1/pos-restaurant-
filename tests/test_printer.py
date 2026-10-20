@@ -83,6 +83,56 @@ class ReceiptTests(unittest.TestCase):
         self.assertIn("Chicken Karahi", text)
         self.assertIn("TOTAL:", text)
 
+    def test_khata_identity_prints_under_bill_number_even_with_optional_sections_off(self):
+        self.bill["customer_id"] = 7
+        self.bill["order_info"].update(khata_customer_name="Ahmed", khata_customer_phone="03001234567",
+                                       customer_name="Delivery recipient")
+        self.config["bill_layout"]["show_customer"] = False
+        text = printer.receipt_text(self.bill, self.config)
+        self.assertIn("Bill #12\nUDHAAR - Ahmed\n", text)
+        self.assertNotIn("Delivery recipient", text)
+        for key, value in self.config["bill_layout"].items():
+            if isinstance(value, bool):
+                self.config["bill_layout"][key] = False
+        text = printer.receipt_text(self.bill, self.config)
+        self.assertIn("UDHAAR - Ahmed", text)
+        self.assertNotIn("Bill #", text)
+        self.assertIn("Rs. 1,500", text)
+
+    def test_khata_long_unicode_name_wraps_and_reprints_saved_identity_and_amounts(self):
+        name = "احمد محمد " + "Long Customer Name " * 5
+        self.bill["customer_id"] = 7
+        self.bill["order_info"]["khata_customer_name"] = name
+        self.bill["order_info"] = json.dumps(self.bill["order_info"], ensure_ascii=False)
+        self.bill["customer_name"] = "Changed current customer name"
+        self.bill["items"][0]["price"] = 9999
+        original = copy.deepcopy(self.bill)
+        for width, columns in ((58, 32), (80, 48)):
+            with self.subTest(paper_width=width):
+                self.config["paper_width"] = width
+                receipt = printer._receipt(self.bill, self.config)
+                text = printer.receipt_text(self.bill, self.config)
+                self.assertIn("UDHAAR - احمد محمد", text)
+                self.assertNotIn("Changed current", text)
+                self.assertNotIn("9,999", text)
+                self.assertIn("Rs. 1,500", text)
+                self.assertTrue(all(len(line.text(columns)) * line.width <= columns
+                                    for line in receipt.lines))
+                self.assertEqual(printer.render_receipt(self.bill, self.config).width, columns * 12)
+        self.assertEqual(self.bill, original)
+
+    def test_paid_delivery_bill_is_never_marked_as_khata(self):
+        self.bill["order_info"].update(customer_name="Ahmed", order_type="Delivery",
+                                       khata_customer_name="Old unused metadata")
+        self.config["bill_layout"]["show_customer"] = True
+        for customer_id in ("missing", None):
+            if customer_id is None:
+                self.bill["customer_id"] = None
+            text = printer.receipt_text(self.bill, self.config)
+            self.assertIn("Customer: Ahmed", text)
+            self.assertNotIn("UDHAAR", text)
+            self.assertNotIn("Old unused metadata", text)
+
     def test_order_promos_tax_footer_and_json_items(self):
         self.config["bill_layout"].update({"show_order_type": True, "show_table_waiter": True,
             "show_customer": True, "show_tax": True, "promo_lines": ["Eid Mubarak", "Delivery available"],

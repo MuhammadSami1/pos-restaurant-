@@ -131,12 +131,16 @@ class BillingApp(ctk.CTk):
         self._empty_labels = []
         self._header_logo = None
         self.delivery_enabled = tk.BooleanVar(value=False)
+        self.udhaar_enabled = tk.BooleanVar(value=False)
         self.delivery_value = tk.StringVar(value=str(self.config.get("delivery_fee", 0)))
         self._delivery_dirty = False
         self.printing = False
         self._print_events = queue.Queue()
         self._last_day = date.today().isoformat()
-        self._settings = self._sales = None
+        self._settings = self._sales = self._khata = None
+        self._customer_page = None
+        self._pending_bill = None
+        self._saving_bill = False
         self._search_after = self._grid_after = None
         self._columns = 3
         self.grid_columnconfigure(0, weight=1)
@@ -169,7 +173,8 @@ class BillingApp(ctk.CTk):
         self.theme_btn = ctk.CTkButton(header, text="☀  Light", width=90, height=38, fg_color=BG, text_color=TEXT, command=self.toggle_theme)
         self.theme_btn.grid(row=0, column=2, padx=5)
         ctk.CTkButton(header, text="Sales", width=90, height=38, fg_color=BG, text_color=TEXT, command=self.open_sales).grid(row=0, column=3, padx=5)
-        ctk.CTkButton(header, text="⚙  Settings", width=110, height=38, fg_color=BG, text_color=TEXT, command=self.open_settings).grid(row=0, column=4, padx=(5, 20))
+        ctk.CTkButton(header, text="Khata", width=90, height=38, fg_color=BG, text_color=TEXT, command=self.open_khata).grid(row=0, column=4, padx=5)
+        ctk.CTkButton(header, text="⚙  Settings", width=110, height=38, fg_color=BG, text_color=TEXT, command=self.open_settings).grid(row=0, column=5, padx=(5, 20))
 
     def _build_body(self):
         body = ctk.CTkFrame(self, fg_color="transparent")
@@ -208,9 +213,17 @@ class BillingApp(ctk.CTk):
         self.item_count = ctk.CTkLabel(cart_title, text="0 items", text_color=MUTED)
         self.item_count.pack(side="right")
         self.order_type = tk.StringVar(value="Dine-in")
-        ctk.CTkSegmentedButton(cart, values=["Dine-in", "Takeaway", "Delivery"], variable=self.order_type, height=35,
+        order_bar = ctk.CTkFrame(cart, fg_color="transparent")
+        order_bar.grid(row=1, column=0, padx=18, pady=(0, 8), sticky="ew")
+        order_bar.grid_columnconfigure(0, weight=1)
+        ctk.CTkSegmentedButton(order_bar, values=["Dine-in", "Takeaway", "Delivery"], variable=self.order_type, height=35,
                                selected_color=SELECTION, selected_hover_color=SELECTION_HOVER, text_color=TEXT,
-                               command=self._select_order_type).grid(row=1, column=0, padx=18, pady=(0, 8), sticky="ew")
+                               command=self._select_order_type).grid(row=0, column=0, sticky="ew")
+        self.udhaar_box = ctk.CTkFrame(order_bar, fg_color="transparent", corner_radius=8)
+        self.udhaar_box.grid(row=0, column=1, padx=(8, 0), sticky="ns")
+        self.udhaar_switch = ctk.CTkSwitch(self.udhaar_box, text="Udhaar", variable=self.udhaar_enabled,
+                                           width=100, progress_color=ACCENT, text_color=MUTED)
+        self.udhaar_switch.pack(padx=8, pady=6)
         self.order_fields = ctk.CTkFrame(cart, fg_color="transparent", height=34)
         self.order_fields.grid(row=2, column=0, padx=18, sticky="ew")
         self.table_var, self.waiter_var = tk.StringVar(), tk.StringVar()
@@ -282,7 +295,15 @@ class BillingApp(ctk.CTk):
         self.discount_value.trace_add("write", lambda *_: self.update_totals())
         self.discount_mode.trace_add("write", lambda *_: self.update_totals())
         self.delivery_value.trace_add("write", self._delivery_edited)
+        self.udhaar_enabled.trace_add("write", self._update_udhaar)
         self._update_delivery_controls()
+
+    def _update_udhaar(self, *_):
+        enabled = self.udhaar_enabled.get()
+        self.udhaar_box.configure(fg_color=("#FBE5C4", "#49341E") if enabled else "transparent")
+        self.udhaar_switch.configure(text_color=ACCENT_TEXT if enabled else MUTED)
+        self.print_btn.configure(text="SAVE TO KHATA  ↵" if enabled else "PRINT BILL  ↵")
+        self.update_totals()
 
     def _select_order_type(self, value):
         self.order_type.set(value)
@@ -376,6 +397,8 @@ class BillingApp(ctk.CTk):
         self.today_label.configure(text=f"Today: {money(summary['total'])}  ·  {summary['count']} bills")
         if self._sales and self._sales.winfo_exists():
             self._sales.refresh()
+        if self._khata and self._khata.winfo_exists():
+            self._khata.refresh()
 
     def render_dishes(self):
         self._search_after = self._grid_after = None
@@ -550,12 +573,14 @@ class BillingApp(ctk.CTk):
         self.tax_value.configure(text=money(totals["tax"]))
         self.delivery_total.configure(text=money(totals["delivery_fee"]) if self.delivery_enabled.get() else "Off")
         self.total_label.configure(text=money(totals["total"]))
-        self.print_btn.configure(state="normal" if self.cart and not self.printing else "disabled")
+        choosing = self._customer_page is not None and self._customer_page.winfo_exists()
+        self.print_btn.configure(state="normal" if self.cart and not self.printing and not choosing and not self._saving_bill else "disabled")
 
     def clear_cart(self, ask=True):
         if ask and self.cart and not confirm(self, "Clear current bill", "Remove all items from this unprinted bill?"):
             return
         self.cart.clear()
+        self.udhaar_enabled.set(False)
         self.delivery_enabled.set(False)
         self.delivery_value.set(str(self.config.get("delivery_fee", 0)))
         self._delivery_dirty = False
@@ -569,7 +594,10 @@ class BillingApp(ctk.CTk):
         self.render_cart()
 
     def checkout(self):
-        if self.printing or not self.cart:
+        if self._customer_page is not None and self._customer_page.winfo_exists():
+            bring_to_front(self._customer_page)
+            return
+        if self.printing or self._saving_bill or not self.cart:
             return
         try:
             totals = self.totals()
@@ -578,13 +606,60 @@ class BillingApp(ctk.CTk):
                      "waiter": self.waiter_var.get().strip() if kind == "Dine-in" else "",
                      "customer_name": self.customer_var.get().strip() if kind == "Delivery" else "",
                      "customer_phone": self.phone_var.get().strip() if kind == "Delivery" else ""}
-            bill = self.db.save_bill(copy.deepcopy(self.cart), order_info=order, **totals)
+            snapshot = {"items": copy.deepcopy(self.cart), "order_info": order, **totals}
+            if self.udhaar_enabled.get():
+                from customer_page import CustomerPage
+                self._pending_bill = snapshot
+                self._customer_page = CustomerPage(self, totals["total"], self._attach_khata,
+                                                     on_cancel=self._cancel_khata)
+                self.update_totals()
+                return
+            self._saving_bill = True
+            bill = self.db.save_bill(**snapshot)
         except Exception as exc:
             error(self, "Bill was not saved", exc)
             return
+        finally:
+            self._saving_bill = False
+        self._complete_sale(bill)
+
+    def _cancel_khata(self):
+        self._pending_bill = None
+        self._customer_page = None
+        self.update_totals()
+
+    def _attach_khata(self, customer_id=None, new_customer=None):
+        if self._pending_bill is None or self._saving_bill:
+            return False
+        if self.printing:
+            raise ValueError("Wait for the current receipt to finish printing, then save this bill.")
+        if customer_id is None and new_customer is None:
+            raise ValueError("Choose an existing customer or enter a new customer name.")
+        self._saving_bill = True
+        try:
+            # A failed or duplicate customer save leaves the entire order intact.
+            bill = self.db.save_bill(**self._pending_bill, customer_id=customer_id,
+                                     new_customer=new_customer)
+        finally:
+            self._saving_bill = False
+        self._pending_bill = None
+        self._customer_page = None
+        self._complete_sale(bill)
+        return True
+
+    def _complete_sale(self, bill):
+        """A committed sale stays saved even if refreshing or printing fails."""
         self.clear_cart(ask=False)
-        self.refresh_sales()
-        self.print_saved_bill(bill, saved_new=True)
+        try:
+            self.refresh_sales()
+        except Exception as exc:
+            error(self, "Bill saved", f"Bill #{bill['bill_no']} is saved. Reopen Sales or Khata to refresh totals.\n\n{exc}")
+        try:
+            self.print_saved_bill(bill, saved_new=True)
+        except Exception as exc:
+            self.printing = False
+            self.update_totals()
+            error(self, "Bill saved; could not print", f"Bill #{bill['bill_no']} is saved. Use Reprint last to retry without creating another sale.\n\n{exc}")
 
     def print_saved_bill(self, bill, config=None, saved_new=False):
         if self.printing:
@@ -691,6 +766,17 @@ class BillingApp(ctk.CTk):
         from sales_screen import SalesScreen
         self._sales = SalesScreen(self)
         bring_to_front(self._sales)
+
+    def open_khata(self):
+        if self._raise_active_dialog():
+            return
+        if self._khata and self._khata.winfo_exists():
+            self._khata.refresh()
+            bring_to_front(self._khata)
+            return
+        from khata_screen import KhataScreen
+        self._khata = KhataScreen(self)
+        bring_to_front(self._khata)
 
     def _raise_active_dialog(self):
         grabbed = self.grab_current()

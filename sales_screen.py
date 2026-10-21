@@ -19,6 +19,17 @@ def _timestamp(value):
         return str(value or "")
 
 
+def _khata_label(bill):
+    order = bill.get("order_info") or {}
+    if isinstance(order, str):
+        try:
+            order = json.loads(order)
+        except (TypeError, ValueError):
+            order = {}
+    name = order.get("khata_customer_name") if isinstance(order, dict) else None
+    return f"UDHAAR · {name or ('Customer #' + str(bill['customer_id']))}"
+
+
 class DatePicker(ctk.CTkToplevel):
     """Dependency-free calendar supporting month and year navigation."""
 
@@ -205,7 +216,8 @@ class SalesScreen(ctk.CTkToplevel):
             row.pack(fill="x", pady=4)
             info = ctk.CTkFrame(row, fg_color="transparent")
             info.pack(side="left", fill="x", expand=True, padx=14, pady=12)
-            label = ctk.CTkLabel(info, text=f"Bill #{bill['bill_no']}", anchor="w",
+            title = f"Bill #{bill['bill_no']}" + (" · UDHAAR" if bill.get("customer_id") is not None else "")
+            label = ctk.CTkLabel(info, text=title, anchor="w",
                                  font=ctk.CTkFont(size=16, weight="bold"))
             label.pack(fill="x")
             stamp = ctk.CTkLabel(info, text=_timestamp(bill.get("created_at", bill.get("date"))),
@@ -275,6 +287,10 @@ class BillDetail(ctk.CTkToplevel):
                       fg_color=PANEL, text_color=TEXT, command=self.app.toggle_theme).pack(side="right")
         ctk.CTkLabel(self, text=_timestamp(bill.get("created_at", bill.get("date"))),
                      text_color=MUTED, anchor="w").pack(fill="x", padx=24, pady=(0, 12))
+        if bill.get("customer_id") is not None:
+            ctk.CTkLabel(self, text=_khata_label(bill), text_color=ACCENT_TEXT,
+                         font=ctk.CTkFont(size=17, weight="bold"), anchor="w",
+                         justify="left", wraplength=570).pack(fill="x", padx=24, pady=(0, 12))
         actions = ctk.CTkFrame(self, fg_color="transparent")
         actions.pack(side="bottom", fill="x", padx=20, pady=16)
         ctk.CTkButton(actions, text="Reprint bill", width=125, height=42, fg_color=ACCENT,

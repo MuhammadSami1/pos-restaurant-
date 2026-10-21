@@ -5,7 +5,9 @@ to billing, with no account, login, or splash screen.
 
 ## Run the app
 
-Double-click **`dist\RestaurantBilling.exe`**, or double-click **`launch.cmd`**.
+Double-click **`launch.cmd`**, or **`dist\KhataUpdate\RestaurantBilling.exe`**
+for the current Khata update. The launcher prefers this update when present,
+then falls back to `dist\RestaurantBilling.exe` or the Python source.
 The executable includes Python and all libraries; the restaurant PC does not
 need Python, uv, or an internet connection
 
@@ -58,6 +60,20 @@ This workspace also includes a local uv installation:
 - **Sales** opens on today. Use the calendar, previous/next day, or YYYY-MM-DD
   entry for another day. All dishes sold on the selected day are shown with
   quantities and ranked by item sales revenue before whole-bill discounts/tax.
+- **Udhaar** in the order row changes **Print Bill** to **Save to Khata**.
+  Choose an existing customer (search by name or phone), or enter a new name
+  and optional phone. Cancel keeps the entire current bill unchanged.
+  Saving attaches the bill, counts it in Sales, and prints automatically.
+  The receipt always shows **UDHAAR** and the customer's saved name.
+- **Khata**, beside Sales, shows the combined outstanding balance and every
+  customer's bills and balance. Select a customer to view, reprint, or delete
+  a bill. Deleting voids it and immediately updates both Khata and Sales.
+  Balances include all active credit bills across all dates. There is no
+  payment collection or partial-payment feature.
+- Duplicate customer names are blocked after trimming/collapsing spaces and
+  ignoring letter case. **Ahmad / Ahmed** also match. The duplicate warning
+  offers **Add bill to the existing customer** or **Type different name**;
+  phone numbers do not bypass this guard.
 
 If printing fails, the bill remains saved and the error explains how to retry.
 Check the paper before retrying: a printer can accept part of a receipt before
@@ -128,13 +144,16 @@ config is preserved as `config.damaged-*.json` before defaults are recovered.
 Double-click **`build.cmd`**, or run:
 
 ```powershell
-uv run python -m PyInstaller --noconfirm --clean RestaurantBilling.spec
+uv run python -m PyInstaller --noconfirm --clean --distpath dist/KhataUpdate RestaurantBilling.spec
 uv run python -m unittest discover -s tests -v
 uv run python tests/ui_smoke.py
+uv run python tests/portion_ui_smoke.py
+uv run python tests/khata_ui_smoke.py
 uv run python tests/package_smoke.py
 ```
 
-The build outputs `dist\RestaurantBilling.exe`. The spec bundles CustomTkinter,
+The command above outputs `dist\KhataUpdate\RestaurantBilling.exe`. The build
+script uses that folder when the update exists, otherwise `dist`. The spec bundles CustomTkinter,
 Tcl/Tk, ESC/POS capabilities, Windows printing support, and libusb. It does not
 bundle the restaurant database or the owner's photos.
 

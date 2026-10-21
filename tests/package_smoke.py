@@ -15,7 +15,10 @@ import win32gui
 import win32process
 
 ROOT = Path(__file__).resolve().parents[1]
-EXE = ROOT / "dist" / "RestaurantBilling.exe"
+DEFAULT_EXE = ROOT / "dist" / "KhataUpdate" / "RestaurantBilling.exe"
+if not DEFAULT_EXE.is_file():
+    DEFAULT_EXE = ROOT / "dist" / "RestaurantBilling.exe"
+EXE = Path(os.environ.get("RESTAURANT_BILLING_TEST_EXE", DEFAULT_EXE)).resolve()
 assert EXE.is_file(), "Build RestaurantBilling.exe first."
 
 
@@ -158,6 +161,8 @@ with tempfile.TemporaryDirectory(prefix="package-", dir=ROOT / ".test-data") as 
         with closing(sqlite3.connect(Path(folder) / "restaurant.db")) as conn:
             assert conn.execute("SELECT COUNT(*) FROM dishes").fetchone()[0] == 9
             assert conn.execute("SELECT COUNT(*) FROM bills").fetchone()[0] == 0
+            assert conn.execute("SELECT COUNT(*) FROM customers").fetchone()[0] == 0
+            assert "customer_id" in {row[1] for row in conn.execute("PRAGMA table_info(bills)")}
         config = json.loads((Path(folder) / "config.json").read_text(encoding="utf-8"))
         assert config["theme"] == "dark"
         close_owned_windows(tree, title="Restaurant Billing")

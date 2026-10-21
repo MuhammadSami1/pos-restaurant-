@@ -32,6 +32,34 @@ class ReceiptTests(unittest.TestCase):
         self.assertIn("13-Oct-2026  09:41 PM", text)
         self.assertNotIn("9,999", text)
 
+    def test_fractional_portions_print_saved_amounts_on_both_paper_widths(self):
+        self.bill["items"] = [
+            {"name": "Chicken", "qty": 0.25, "unit": "kg", "price": 1000,
+             "portion_prices": {"0.25": 300, "0.5": 550, "0.75": 800, "1": 1000}, "amount": 300},
+            {"name": "Mutton", "qty": 0.75, "unit": "kg", "price": 1800,
+             "portion_prices": {"0.25": 500, "0.5": 950, "0.75": 1400, "1": 1800}, "amount": 1400},
+            {"name": "Biryani", "qty": 0.5, "unit": "count", "price": 250,
+             "portion_prices": {"0.5": 150, "1": 250}, "amount": 150},
+        ]
+        self.bill.update(subtotal=1850, discount=0, tax=0, total=1850)
+        # A reprint must use its stored amounts, even if pricing metadata differs.
+        self.bill["items"][0]["portion_prices"]["0.25"] = 9999
+        original = copy.deepcopy(self.bill)
+        for width, columns in ((58, 32), (80, 48)):
+            with self.subTest(paper_width=width):
+                self.config["paper_width"] = width
+                receipt = printer._receipt(self.bill, self.config)
+                for prefix, amount in (("0.25 kg Chicken", "300"), ("0.75 kg Mutton", "1,400"),
+                                       ("0.5x Biryani", "150")):
+                    line = next(line for line in receipt.lines if line.left == prefix)
+                    self.assertEqual(line.right, amount)
+                text = printer.receipt_text(self.bill, self.config)
+                self.assertIn("Rs. 1,850", text)
+                self.assertNotIn("9,999", text)
+                self.assertTrue(all(len(line.text(columns)) * line.width <= columns
+                                    for line in receipt.lines))
+        self.assertEqual(self.bill, original)
+
     def test_each_line_fits_both_paper_widths_including_large_numbers(self):
         self.bill["items"][0]["name"] = "Very long Chicken Karahi special family takeaway with extra spices " * 3
         self.bill["total"] = 123456789.75
@@ -54,6 +82,56 @@ class ReceiptTests(unittest.TestCase):
         self.assertNotIn("Thank you", text)
         self.assertIn("Chicken Karahi", text)
         self.assertIn("TOTAL:", text)
+
+    def test_khata_identity_prints_under_bill_number_even_with_optional_sections_off(self):
+        self.bill["customer_id"] = 7
+        self.bill["order_info"].update(khata_customer_name="Ahmed", khata_customer_phone="03001234567",
+                                       customer_name="Delivery recipient")
+        self.config["bill_layout"]["show_customer"] = False
+        text = printer.receipt_text(self.bill, self.config)
+        self.assertIn("Bill #12\nUDHAAR - Ahmed\n", text)
+        self.assertNotIn("Delivery recipient", text)
+        for key, value in self.config["bill_layout"].items():
+            if isinstance(value, bool):
+                self.config["bill_layout"][key] = False
+        text = printer.receipt_text(self.bill, self.config)
+        self.assertIn("UDHAAR - Ahmed", text)
+        self.assertNotIn("Bill #", text)
+        self.assertIn("Rs. 1,500", text)
+
+    def test_khata_long_unicode_name_wraps_and_reprints_saved_identity_and_amounts(self):
+        name = "احمد محمد " + "Long Customer Name " * 5
+        self.bill["customer_id"] = 7
+        self.bill["order_info"]["khata_customer_name"] = name
+        self.bill["order_info"] = json.dumps(self.bill["order_info"], ensure_ascii=False)
+        self.bill["customer_name"] = "Changed current customer name"
+        self.bill["items"][0]["price"] = 9999
+        original = copy.deepcopy(self.bill)
+        for width, columns in ((58, 32), (80, 48)):
+            with self.subTest(paper_width=width):
+                self.config["paper_width"] = width
+                receipt = printer._receipt(self.bill, self.config)
+                text = printer.receipt_text(self.bill, self.config)
+                self.assertIn("UDHAAR - احمد محمد", text)
+                self.assertNotIn("Changed current", text)
+                self.assertNotIn("9,999", text)
+                self.assertIn("Rs. 1,500", text)
+                self.assertTrue(all(len(line.text(columns)) * line.width <= columns
+                                    for line in receipt.lines))
+                self.assertEqual(printer.render_receipt(self.bill, self.config).width, columns * 12)
+        self.assertEqual(self.bill, original)
+
+    def test_paid_delivery_bill_is_never_marked_as_khata(self):
+        self.bill["order_info"].update(customer_name="Ahmed", order_type="Delivery",
+                                       khata_customer_name="Old unused metadata")
+        self.config["bill_layout"]["show_customer"] = True
+        for customer_id in ("missing", None):
+            if customer_id is None:
+                self.bill["customer_id"] = None
+            text = printer.receipt_text(self.bill, self.config)
+            self.assertIn("Customer: Ahmed", text)
+            self.assertNotIn("UDHAAR", text)
+            self.assertNotIn("Old unused metadata", text)
 
     def test_order_promos_tax_footer_and_json_items(self):
         self.config["bill_layout"].update({"show_order_type": True, "show_table_waiter": True,

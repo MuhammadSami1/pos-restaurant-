@@ -150,6 +150,15 @@ def _receipt(bill: dict, config: dict) -> _Receipt:
             add(left, bold=bold, width=width)
             add(right, align="right", bold=bold, width=width)
 
+    order = bill.get("order_info") or {}
+    if isinstance(order, str):
+        try:
+            order = json.loads(order)
+        except (ValueError, TypeError):
+            order = {}
+    if not isinstance(order, dict):
+        order = {}
+
     logo = _load_logo(config, pixels) if layout.get("show_logo") else None
     if bill.get("is_test"):
         add("TEST PRINT - NOT A SALE", align="center", bold=True)
@@ -162,6 +171,11 @@ def _receipt(bill: dict, config: dict) -> _Receipt:
             add(config[key], align="center")
     if layout.get("show_bill_no"):
         add(f"Bill #{_clean(bill.get('bill_no', '-'), 30)}", align="center")
+    if bill.get("customer_id") is not None:
+        # Credit status and the saved customer identity are never optional.
+        customer = _clean(order.get("khata_customer_name"), 300).replace("\n", " ")
+        customer = customer or f"Customer #{_clean(bill['customer_id'], 30)}"
+        add(f"UDHAAR - {customer}", align="center", bold=True)
     if layout.get("show_datetime"):
         timestamp = _clean(bill.get("created_at") or bill.get("date"), 80)
         try:
@@ -171,14 +185,6 @@ def _receipt(bill: dict, config: dict) -> _Receipt:
         if timestamp:
             add(timestamp, align="center")
 
-    order = bill.get("order_info") or {}
-    if isinstance(order, str):
-        try:
-            order = json.loads(order)
-        except (ValueError, TypeError):
-            order = {}
-    if not isinstance(order, dict):
-        order = {}
     order = {**bill, **order}
     if layout.get("show_order_type") and order.get("order_type"):
         add(f"Order: {order['order_type']}")

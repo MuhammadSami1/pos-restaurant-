@@ -11,7 +11,9 @@ from unittest.mock import patch
 
 import app_config
 from db import Database
-from models import amount, calculate_totals, money, quantity_text, validate_quantity
+from models import (amount, calculate_totals, item_amount, money, normalize_items,
+                    normalize_portion_prices, portion_quantities, quantity_text,
+                    validate_quantity)
 
 
 class BillDataTests(unittest.TestCase):
@@ -73,6 +75,37 @@ class BillDataTests(unittest.TestCase):
         self.assertEqual(read["items"][0]["name"], "Chicken Karahi")
         self.assertEqual(read["items"][0]["amount"], 1425.0)
         self.assertEqual(read["total"], 1545.0)
+
+    def test_portion_prices_persist_and_printed_bill_keeps_original_rates(self):
+        prices = {"0.25": 330, "0.5": 625, "0.75": 875, "1": 1100}
+        dish_id = self.db.save_dish({"name": "Portion Karahi", "sell_type": "kg",
+                                    "price": 1100, "portion_prices": prices})
+        self.db.close()
+        self.db = Database(self.path)
+        dish = next(dish for dish in self.db.list_dishes() if dish["id"] == dish_id)
+        self.assertEqual(dish["portion_prices"], prices)
+        bill = self.db.save_bill([{**dish, "dish_id": dish_id, "qty": 1.75}], now=self.now)
+        self.assertEqual(bill["subtotal"], 1975)
+        dish.update(price=1500, portion_prices={"0.25": 450, "0.5": 800, "0.75": 1200, "1": 1500})
+        self.db.save_dish(dish)
+        prices["0.75"] = 999
+        self.db.close()
+        self.db = Database(self.path)
+        saved_item = self.db.get_bill(bill["id"])["items"][0]
+        self.assertEqual(saved_item["portion_prices"]["0.75"], 875)
+        self.assertEqual(saved_item["price"], 1100)
+        self.assertEqual(saved_item["amount"], 1975)
+        self.assertEqual(calculate_totals([saved_item])["total"], 1975)
+
+    def test_invalid_portion_prices_do_not_change_saved_dish(self):
+        dish = self.db.list_dishes()[0]
+        original_price = dish["price"]
+        dish.update(price=2000, portion_prices={"0.5": 1000, "1": 2000})
+        with self.assertRaises(ValueError):
+            self.db.save_dish(dish)
+        restored = self.db.list_dishes()[0]
+        self.assertEqual(restored["price"], original_price)
+        self.assertEqual(restored["portion_prices"], {})
 
     def test_delivery_charge_is_a_saved_snapshot_and_is_included_in_sales(self):
         totals = calculate_totals(self.items, 10, "%", 16, delivery_fee=150)
@@ -172,6 +205,8 @@ class BillDataTests(unittest.TestCase):
         instance = Database(legacy_path)
         try:
             self.assertEqual(instance.list_dishes()[0]["name"], "Original dish")
+            self.assertEqual(instance.list_dishes()[0]["portion_prices"], {})
+            self.assertEqual(item_amount({**instance.list_dishes()[0], "qty": 0.5}), 6)
             self.assertEqual(instance.get_bill(1)["order_info"], {})
             self.assertEqual(instance.get_bill(1)["delivery_fee"], 0)
             self.assertEqual(instance.get_bill(1)["total"], 100)
@@ -233,7 +268,7 @@ class MoneyTests(unittest.TestCase):
         self.assertEqual(amount(2.675), 2.68)
 
     def test_rejects_nonfinite_negative_and_fractional_count(self):
-        for value in (float("nan"), float("inf"), -1, 0, 1.5, True, "1e308"):
+        for value in (float("nan"), float("inf"), -1, 0, 0.25, 1.25, True, "1e308"):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 validate_quantity(value, "count")
         for value in (-0.001, float("nan"), float("inf")):
@@ -245,6 +280,53 @@ class MoneyTests(unittest.TestCase):
             amount("1e308")
         with self.assertRaises(ValueError):
             calculate_totals([{"name": "Bulk", "qty": 1_000_000, "unit": "kg", "price": 1_000_000}])
+
+
+class PortionPriceTests(unittest.TestCase):
+    def test_weight_portions_use_entered_prices_and_full_units_plus_remainder(self):
+        dish = {"name": "Karahi", "unit": "kg", "price": 1100,
+                "portion_prices": {"0.25": 330, "0.5": 625, "0.75": 875, "1": 1100}}
+        for qty, expected in ((0.25, 330), (0.5, 625), (0.75, 875), (1, 1100),
+                              (1.25, 1430), (1.75, 1975), (2.5, 2825)):
+            with self.subTest(qty=qty):
+                self.assertEqual(item_amount(dish, qty), expected)
+                self.assertEqual(calculate_totals([{**dish, "qty": qty}])["subtotal"], expected)
+        with self.assertRaises(ValueError):
+            item_amount(dish, 0.3)
+        self.assertEqual(item_amount({**dish, "portion_prices": {}}, 0.3), 330)
+
+    def test_count_half_portions_preserve_custom_price_and_format_quantity(self):
+        dish = {"name": "Biryani", "unit": "count", "price": 260,
+                "portion_prices": {"0.5": 150, "1": 260}}
+        for qty, expected in ((0.5, 150), (1, 260), (1.5, 410), (2.5, 670)):
+            with self.subTest(qty=qty):
+                self.assertEqual(item_amount(dish, qty), expected)
+        self.assertEqual(quantity_text(0.5, "count"), "0.5")
+        self.assertEqual(item_amount({**dish, "portion_prices": {}}, 0.5), 130)
+        for qty in (0.25, 0.75, 1.25):
+            with self.subTest(qty=qty), self.assertRaises(ValueError):
+                item_amount(dish, qty)
+
+    def test_custom_price_validation_and_canonical_full_price(self):
+        self.assertEqual(portion_quantities("kg"), (0.25, 0.5, 0.75, 1))
+        self.assertEqual(portion_quantities("count"), (0.5, 1))
+        prices = normalize_portion_prices({"0.5": "150.555", "1": 260}, "count", 300)
+        self.assertEqual(prices, {"0.5": 150.56, "1": 300})
+        for invalid in ({"1": 300}, {"0.5": 150, "1": 300, "0.25": 80},
+                        {"0.5": -1, "1": 300}, {"0.5": "NaN", "1": 300},
+                        {"0.5": "", "1": 300}, "not a price map"):
+            with self.subTest(prices=invalid), self.assertRaises(ValueError):
+                normalize_portion_prices(invalid, "count", 300)
+        self.assertEqual(normalize_portion_prices(None, "count", 300), {})
+
+    def test_normalization_freezes_rates_and_ignores_supplied_line_amount(self):
+        prices = {"0.5": 150, "1": 260}
+        items = [{"name": "Biryani", "qty": 1.5, "price": 260, "unit": "count",
+                  "portion_prices": prices, "amount": 1}]
+        saved = normalize_items(items)[0]
+        prices["0.5"] = 1
+        self.assertEqual(saved["amount"], 410)
+        self.assertEqual(saved["portion_prices"], {"0.5": 150, "1": 260})
 
 
 class ConfigTests(unittest.TestCase):

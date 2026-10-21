@@ -5,9 +5,11 @@ to billing, with no account, login, or splash screen.
 
 ## Run the app
 
-Double-click **`dist\RestaurantBilling.exe`**, or double-click **`launch.cmd`**.
+Double-click **`launch.cmd`**, or **`dist\KhataUpdate\RestaurantBilling.exe`**
+for the current Khata update. The launcher prefers this update when present,
+then falls back to `dist\RestaurantBilling.exe` or the Python source.
 The executable includes Python and all libraries; the restaurant PC does not
-need Python, uv, or an internet connection.
+need Python, uv, or an internet connection
 
 The nine starter dishes and prices come from AGENTS.md. Open **Settings → Dishes**
 to change them. Dish changes appear immediately on the billing screen.
@@ -30,8 +32,13 @@ This workspace also includes a local uv installation:
 ## Daily use
 
 - Tap a dish to add one. Hold it for quantity presets or a typed quantity.
-- Count dishes use whole quantities; weight dishes use kilograms. Edit a bill
-  line with **+ / − / ✎ / ✕** before printing.
+- Set separate prices in the dish editor: **0.25 / 0.5 / 0.75 / 1 kg** for weight
+  dishes, or **0.5 / 1** for count dishes. For quantities above 1, the price is
+  full portions plus the remaining portion (1.75 kg = 1 kg price + 0.75 kg price).
+  Existing dishes keep their original pricing until you save portion prices.
+- Edit a bill line with **+ / − / ✎ / ✕** before printing. **+ / −** changes weight
+  by **0.25 kg**, or count by **0.5**. Quantity presets include quarter and
+  three-quarter kg and half count portions. The quantity popup shows the amount.
 - A dish's corner **✎** edits its menu details; **✕** deletes it from the menu.
   Existing bill lines retain their original names, prices, and selling types.
 - Choose Dine-in, Takeaway, or Delivery. Table/waiter and customer details are
@@ -53,6 +60,20 @@ This workspace also includes a local uv installation:
 - **Sales** opens on today. Use the calendar, previous/next day, or YYYY-MM-DD
   entry for another day. All dishes sold on the selected day are shown with
   quantities and ranked by item sales revenue before whole-bill discounts/tax.
+- **Udhaar** in the order row changes **Print Bill** to **Save to Khata**.
+  Choose an existing customer (search by name or phone), or enter a new name
+  and optional phone. Cancel keeps the entire current bill unchanged.
+  Saving attaches the bill, counts it in Sales, and prints automatically.
+  The receipt always shows **UDHAAR** and the customer's saved name.
+- **Khata**, beside Sales, shows the combined outstanding balance and every
+  customer's bills and balance. Select a customer to view, reprint, or delete
+  a bill. Deleting voids it and immediately updates both Khata and Sales.
+  Balances include all active credit bills across all dates. There is no
+  payment collection or partial-payment feature.
+- Duplicate customer names are blocked after trimming/collapsing spaces and
+  ignoring letter case. **Ahmad / Ahmed** also match. The duplicate warning
+  offers **Add bill to the existing customer** or **Type different name**;
+  phone numbers do not bypass this guard.
 
 If printing fails, the bill remains saved and the error explains how to retry.
 Check the paper before retrying: a printer can accept part of a receipt before
@@ -123,13 +144,16 @@ config is preserved as `config.damaged-*.json` before defaults are recovered.
 Double-click **`build.cmd`**, or run:
 
 ```powershell
-uv run python -m PyInstaller --noconfirm --clean RestaurantBilling.spec
+uv run python -m PyInstaller --noconfirm --clean --distpath dist/KhataUpdate RestaurantBilling.spec
 uv run python -m unittest discover -s tests -v
 uv run python tests/ui_smoke.py
+uv run python tests/portion_ui_smoke.py
+uv run python tests/khata_ui_smoke.py
 uv run python tests/package_smoke.py
 ```
 
-The build outputs `dist\RestaurantBilling.exe`. The spec bundles CustomTkinter,
+The command above outputs `dist\KhataUpdate\RestaurantBilling.exe`. The build
+script uses that folder when the update exists, otherwise `dist`. The spec bundles CustomTkinter,
 Tcl/Tk, ESC/POS capabilities, Windows printing support, and libusb. It does not
 bundle the restaurant database or the owner's photos.
 

@@ -1,5 +1,9 @@
 @echo off
 cd /d "%~dp0"
+if exist "dist\KhataUpdate\RestaurantBilling.exe" (
+    start "" "dist\KhataUpdate\RestaurantBilling.exe"
+    exit /b
+)
 if exist "dist\RestaurantBilling.exe" (
     start "" "dist\RestaurantBilling.exe"
     exit /b
